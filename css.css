@@ -1,0 +1,220 @@
+body {
+    color: black;
+    background-color: white;
+    
+    list-style-type:none;
+}
+body,.usertext  {
+	font:small verdana,arial,helvetica,sans-serif;
+}
+.chattext 
+{
+	font:small verdana,arial,helvetica,sans-serif;
+	margin-left:5px;
+}
+
+a {
+    padding-left:3px;
+    padding-right:3px;
+    border:1px solid transparent;
+	border-radius:5px;
+}
+a:link {text-decoration: none; color:rgb(106, 106, 106);}
+a:visited {text-decoration: none; color:rgb(106, 106, 106);}
+a:hover {
+	/*background-color: rgb(250, 133, 132);*/
+	border:1px solid rgb(190, 190, 190);
+	
+	/*background-color: blue;*/
+}
+.comments {
+    /*max-width: 500px;*/
+    /*overflow:hidden !important;*/
+    height:5000px;
+}
+
+.biglink,.biglink:visited {
+    font:large verdana,arial,helvetica,sans-serif;
+	min-width:10px;
+	min-height:10px;
+	background-color:rgb(235, 235, 235);
+	color:rgb(115, 115, 115);
+}
+
+.pagetoplevel 
+{
+	padding:5px;
+}
+
+.userimage  
+{
+	max-width:480px;
+	max-height:480px;
+}
+
+.chatbox {
+    margin:3px 2px;
+    padding:3px;
+	font-size:small;
+	font-weight:normal;
+	border:1px solid black;
+}
+ul {
+    list-style: disc outside none;
+    margin:5px 19px;
+    padding:0px;
+}
+
+.pbutton {
+	text-decoration: none;
+	border: 1px solid rgb(110,110,110);
+	background-color: rgb(90, 90, 140);
+	border-radius:6px;
+	
+	color: white !important;
+	box-shadow:         1px 1px 1px 1px #ccc;
+    font-weight:bold;
+    font-size:x-small;
+}
+.pbutton:hover {
+	background-color: rgb(190, 133, 132);
+	/*background-color: blue;*/
+}
+.pbuttonact  {
+	background-color: rgb(200, 13, 12);
+}
+
+/*a[href*="readm"] {
+	font-size:x-large;
+}*/
+.pagetitle 
+{
+	width:500px;
+}
+/* a whole comment, including children */
+.comment {
+    padding:3px ;
+    border: 1px solid rgb(210,210,210);
+    background-color: rgb(240, 243, 252);
+    margin-left:6px;
+    display:block;
+	overflow: hidden !important;
+}
+/* username, the usertext, and the buttons*/
+.thiscomment {
+    padding:0px ;
+    margin-left:15px ;
+    display:block;
+    /*border: 1px solid rgb(210,210,210);*/
+    list-style-type:none;
+    
+}
+.usertext {
+    min-height:3px;
+    min-width:13px;
+    /*border: 1px solid rgb(180,180,180);*/
+    /*background-color: rgb(240, 239, 252);*/
+    padding:1px;
+	margin:0px;
+    overflow:auto;
+    display:inline-block;
+    font-size:small;
+	font-weight:normal;
+	max-width:600px;
+    max-height:500px;
+}
+.buttons {
+    padding:0px;
+    margin:0px;
+    font-weight:bold;
+    font-size:x-small;
+}
+.button {
+    padding-left:5px;
+    padding-right:5px;
+    font-weight:bold;
+    font-size:x-small;
+}
+.namebar {
+    /*font-weight:bold;*/
+}
+.username {
+	font:12px monospace !important;
+    padding:2px;
+    color:rgb(40,40,250);
+}
+.username_me {
+    color:rgb(180,50,50);
+}
+
+.flaggood {
+    color:rgb(110,150,110);
+    padding-left:2px;
+    padding-right:2px;
+    /*font-weight:bold;
+    font-size:x-small;*/
+    cursor:default;
+}
+.flagbad {
+    color:red;
+    padding-left:2px;
+    padding-right:2px;
+    /*font-weight:bold;
+    font-size:x-small;*/
+    cursor:default;
+}
+
+
+.usertext p {
+    margin:1px 1px;
+}
+.usertext a {font-size:x-small;}
+.usertext a:link {text-decoration: none; color:rgb(16, 16, 106);}
+.usertext a:visited {text-decoration: none; color:rgb(16, 16, 106);}
+
+
+.votebox {
+    float:left;
+    width:15px;
+    height:30px;
+    background:rgb(210,210,210);
+    display:block;
+}
+
+.replybox {
+    width:350px;
+    height:70px;
+}
+
+.timestring 
+{
+	margin:3px;
+}
+
+.jsonstruct
+{
+	min-height:3px;
+	min-width:13px;
+	border: 1px solid rgb(210,180,180);
+	background-color: rgb(240, 239, 252);
+	overflow:auto;
+    display:inline-block;
+}
+
+.jsonname {
+	max-width:100px;
+	overflow:hidden;
+	word-wrap : break-word;
+}
+
+table, td {
+    padding:3px ;
+    /*margin-left:15px ;
+    display:block;*/
+	overflow:hidden;
+	table-layout:fixed;
+    border: 1px solid rgb(110,110,110);
+    border-collapse:collapse;
+    vertical-align:top;
+    font:small verdana,arial,helvetica,sans-serif;
+}

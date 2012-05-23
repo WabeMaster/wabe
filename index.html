@@ -1,0 +1,1529 @@
+<head>
+
+<link rel="stylesheet" href="css.css" type="text/css" />
+
+<script type="text/javascript" src="crypto.js" ></script>
+
+<script language="JavaScript" type="text/javascript" src="util.js"></script>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.7.2/jquery.min.js"></script>
+
+<script type="text/javascript">
+
+/*
+
+REAMDE:
+
+This implementation is not intended to be the final one.
+
+The real idea is keeping an identity on the client.  It
+assumed that no server can be trusted.
+
+In general, identities are easy to keep secret, and
+information is easy to spread.  Signatures and proofs are
+easy to verify.
+
+This system capitalizes on these rules - recursions of the rules.
+
+1. Like PGP, a message can be verified to have come from a source.
+2. A message lookup based on a search is easy to do.
+
+IF YOU JUST WANT TO EDIT THE HTML/JAVASCRIPT:
+
+1. Save files to disk (note, firefox's Save As seems to corrupt index.html and breaks stuff - use some other method.).
+2. Uncomment this line
+    //SERVER_NAME="http://jk43lztczbrel2lp.onion/"
+3. IMPORTANT (for TorBrowser installations):
+    In TorBrowser, go to Addons, Torbutton options,
+    uncheck "Block Tor access to network from file:// urls".
+    See this for security risks:
+      https://www.torproject.org/torbutton/torbutton-options.html.en
+    Basically, should only be a problem if you're saving dangerous sites
+    to your computer.
+  
+most of the client stuff will be done here, anyway.  this is where
+the client can see things are verified, and contains the bulk of the encryption
+and verification code.
+
+servers are a different ballgame.  their challenge will be replication, searching,
+and blocking spam.  This is averaging 250bytes/message, so if one assumes 2k bytes/message,
+1 million messages = 2gb of data.  That's not enough to actively worry about now.
+Servers should probably just throw out huge messages for users that have not prooved their identity.
+
+TODO:
+
+CLIENT SIDE:
+* multiple identities, saved in localStorage (note, doesn't work in Tor.  But could otherwise be saved out to JSON)
+* instead of key object, use a string (for convenience really.. could also change to standard public key rep
+    the problem is that the proof changes per key, which causes them to be not equal)
+   considering just using pubkey.n as the 
+* server queries.  look up unstructured db queries.
+* deal with huge databases.  This takes the exceedingly naive approach of assuming the database is very small.
+* Sorting by votes
+* Neural nets for trust
+* OpenPGP for keys
+
+Page stuff:
+* Minimal mode w/o so much stuff
+* How to display trees concisely - how to list a "subreddit" with 1 child deep.
+  * For instance, if in "all children" mode, how to switch to just top levels?
+
+Lookup:
+* Recursive queries in couchdb (i.e. children of children)
+
+Random ideas to try:
+* Write a python version of the server
+* Run a node yourself, try to replicate this server
+* Styling the CSS
+* Add new buttons - maybe I should add a plugin interface.
+
+*/
+
+
+/*
+The idea is that there will be multiple servers.  But this is not implemented,
+yet.  For now, just 1 server.  It should not be difficult to implement multiple
+servers, by making Post 
+*/
+SERVER_NAME="/" // default, just load json from server hosting the html
+//SERVER_NAME="http://127.0.0.1:8080/" // localhost
+//SERVER_NAME="http://jk43lztczbrel2lp.onion/" //server I am running.
+//SERVER_NAME="http://2imnltem7ifwlvjm.onion/" //my test server
+
+
+
+var LOG_OFF=false
+function Log(msg) {
+    if (LOG_OFF) return
+    if(typeof msg == 'undefined') msg="NIL"
+    t=document.createTextNode(msg);
+    var logdiv=document.getElementById("log")
+    logdiv.appendChild(t)
+    logdiv.appendChild(document.createElement("br"))
+    logdiv.scrollTop = logdiv.scrollHeight; 
+}
+function LogHTML(msg) {
+    var logdiv=document.getElementById("log")
+    logdiv.appendChild(msg)
+    logdiv.appendChild(document.createElement("br"))
+    logdiv.scrollTop = logdiv.scrollHeight; 
+}
+function LogJSON(d) {
+    LogHTML(JSONToHtml(d))
+}
+
+function IsSafari() {
+    return window.getComputedStyle && !window.globalStorage && !window.opera;
+}
+
+// Global key
+var KEY2
+
+function subel(el,type) {
+    var n=document.createElement(type)
+    el.appendChild(n);
+    return n;
+}
+
+function JSONToHtml(k) {
+    var ret=document.createElement("div")
+    ret.className="jsonstruct"
+    ret.appendChild(JSONToHtmlInt(k))
+    return ret
+}
+
+function JSONToHtmlInt(k) {
+    if(typeof k=="object") {
+        var table=document.createElement("table")
+        table.style="border:1px solid black;margin:2px;table-layout:fixed;"
+        table.className="mytable"
+        for (i in k) {
+            var row=subel(table,"tr")
+            var col1=subel(row,"td")
+			col1.className="jsonname"
+			//col1.style="max-width:200px;"
+			/*col1.width="50px"
+			col1.style="overflow:hidden;"*/
+            col1.innerHTML=i
+            var col2=subel(row,"td")
+            col2.appendChild(JSONToHtmlInt(k[i]))
+            //col2.innerHTML=k[i]
+        }
+
+        return table;
+    } else {
+        return document.createTextNode(k)
+    }
+}
+
+
+// The most general communication to the server
+// Takes care of signing, proof of work.
+function Post(msg) {
+    var stringmsg=JSON.stringify(msg);
+    var signature=KEY2.SignMessage(stringmsg);
+    var entry={
+        pubkey:KEY2.PublicPartsJSON(),//{e:KEY2.e,n:KEY2.n},//document.getElementById("myname").value,//IsSafari()?"safari":"user",
+        message:msg,
+        signature:signature,
+        proof:ProoveWork(signature),
+    }
+    MakeJSONRequest("post",entry,function(){Log("Post successful")})
+    jsoncallback([entry])
+    return entry;
+}
+// The most general communication to the server
+// Takes care of signing, proof of work.
+function PostAnon(msg,signature) {
+    var stringmsg=JSON.stringify(msg);
+    var entry={
+        message:msg,
+        signature:signature,
+        proof:ProoveWork(signature),
+    }
+    MakeJSONRequest("post",entry,function(){Log("Post successful")})
+    return entry;
+}
+function UpdateWithSearch(search,callback) {
+    // Give a delay to give earlier requests a chance to go through.
+    setTimeout(function() {
+        Log("Searching database:")
+        MakeJSONRequest("json",search,function(a) {callback && callback(); jsoncallback(a);});
+    },120)
+}
+
+function Reply(parent,comment) {
+    var msg={
+        comment:comment,
+        parent:parent,
+        time:MyCurrentTime(),
+    }
+    var entry=Post(msg)
+    
+    UpdateWithSearch({message:{parent:parent}})
+}
+function Vote(parent,v) {
+    var msg={
+        vote:v,
+        parent:parent,
+    }
+    var entry=Post(msg)
+    
+    UpdateWithSearch({signature:entry.signature})
+}
+
+function CheckCreds(d) {
+    var ret={}
+    ret.verified=false
+    ret.prooved=false
+    if(d.pubkey && d.pubkey.e) {
+        ret.key=KeyFromJSON(d.pubkey)
+        ret.verified=ret.key.CheckSignature(JSON.stringify(d.message),d.signature)
+        ret.prooved=VerifyProof(d.signature,d.proof)
+        ret.diff=ProofDifficulty(d.signature,d.proof)
+        ret.key=null
+    }
+    return ret
+}
+
+
+// INTERESTING FUNCTION:
+// turns user text into HTML
+
+// for creating links to urls
+// from http://stackoverflow.com/questions/3809401/javascript-url-regex
+var urllinker_regex = /([-a-zA-Z0-9@:%_\+.~#?&//=]{2,256}\.[a-z]{2,10}\b(\/[-a-zA-Z0-9@:%_\+.~#?&//=]*)?)/gi;
+    
+function SingleLineToHTML(l) {
+    // prevent HTML elements like scripts.
+    l=l.replace(/</mg,"&lt;")
+    l=l.replace(/>/mg,"&gt;")
+
+    // Italicize between *'s
+    //l=l.replace(/\*([a-zA-Z ]*)\*/mg,"<i>$1</i>")
+    
+    
+    // link URLs
+    l=l.replace(urllinker_regex,"<a href=$1>$1</a>")
+    
+    // link images.  NOT compatible with linking URLs.  Will have to not use regex for this, I guess.
+    //l=l.replace(/([-a-zA-Z0-9@:%_\+.~#?&//=]{2,256}\.jpg)/mg,"<a href=$1><image src=$1 class=userimage /></a>")
+    return l;
+}
+
+// Convert usertext to DOM elements, or an HTML string if return_string is true
+function CommentToHTML(text, return_string) {
+    if(typeof(text)!="string")
+        return JSONToHtml(text)
+    var lines=[]
+    var lastlinestart=0
+    var k=0
+    while(k<text.length) {
+        if(text.substr(k,2)=="\n\n") {
+            lines.push(text.substr(lastlinestart,k-lastlinestart))
+            k+=2
+            //Log(lines.length+" "+lines[lines.length-1])
+            lastlinestart=k
+        } else {
+            k++
+        }
+    }
+    lines.push(text.substr(lastlinestart))
+   
+    for(ln in lines) {
+        lines[ln]=SingleLineToHTML(lines[ln]);
+    }
+
+    var ret=""
+    for (i=0;i<lines.length;i++) {
+        var l=lines[i]
+        if(l.substr(0,2)=="* ") {
+            ret+="<ul>"
+            for(k=i;k<lines.length;k++) {
+                if(lines[k].substr(0,2)=="* ")
+                    ret+="<li>"+lines[k].substr(2)+"</li>"
+                else {
+                    break;
+                }
+            }
+            i=k-1;
+            ret+="</ul>"
+        } else {
+            ret+="<p>"+l+"</p>"
+        }
+    }
+    if(return_string)
+        return ret;
+    var nret=document.createElement("div")
+    nret.innerHTML=ret
+    return nret
+}
+
+// some bloated ui stuff.
+
+var sequential_view
+function SequentialView() {
+    sequential_view=true
+    UpdateCommentsFromDatabase(true,cur_db)
+    UpdateSN();
+}
+function NormalView() {
+    sequential_view=false
+    UpdateCommentsFromDatabase(true,cur_db)
+    UpdateSN();
+}
+function UpdateSN() {
+    document.getElementById("normalview").className="pbutton "+(!sequential_view?"pbuttonact":"")
+    document.getElementById("sequentialview").className="pbutton "+(sequential_view?"pbuttonact":"")
+}
+
+var view_structs=false
+function ViewStructs() {
+    view_structs=!view_structs
+    document.getElementById("viewstructsbutton").className="pbutton "+(view_structs?"pbuttonact":"")
+    PageHashChanged(true)
+}
+
+// Map of signatures->window elements
+var window_lookup={}
+// Map of signatures->database entries
+var database={}
+// Original entries
+var orig_db={}
+// DOM element of the displayed entries
+var page
+// Map of signatures->database entries, for currently displayed page
+var cur_db={}
+// From server via JSON, a structure
+var database_stats
+
+
+function UpdateServerStats() {
+    LOG_OFF=true
+    MakeRequest("dbstats",null,function(a) {
+        database_stats=a;
+        UpdatePageServerStats();
+    })
+    UpdatePageServerStats()
+    setTimeout(UpdateServerStats,5000);
+    LOG_OFF=false
+}
+function UpdateServerStats2() {
+    UpdatePageServerStats()
+    setTimeout(UpdateServerStats2,400);
+}
+function MemberCount(a) {
+    var count=0;
+    for(i in a) count++
+    return count;
+}
+function UpdatePageServerStats() {
+    var count=0;
+    for(i in database) count++
+    //Log("Internal database length (client): "+count)
+    var str="Internal database length (client): "+count;
+    //str+="Server database length (client): "+count;
+    
+    var active=0
+    var str=""
+    for(i in active_xhr) {
+        var xhr=active_xhr[i]
+        active+=(xhr.readyState==4&&xhr.status==200)?0:1
+    }
+    
+    
+    var el=document.getElementById("dbinfo")
+    el.innerHTML=""
+    el.appendChild(JSONToHtml({
+        "known entries":count,
+        
+        "dbstats":database_stats,
+        "my time":(new Date()).secondssinceepoch(),
+        
+    }))
+    
+    $('#processingstats').html(JSONToHtml({
+        left:new_entry_queue.length,
+        total:MemberCount(database),
+        shown:MemberCount(cur_db),
+		"active xhr":active,
+    }))
+}
+
+
+
+var new_entry_queue=[]
+
+// entries are pushed onto new_entry_queue as they are received.
+// this is a background processing function.
+function ProcessNewEntryQueue() {
+    // Note, this is updated too much.
+    var start_time=MyCurrentTime()
+
+    if(new_entry_queue.length==0) return
+    
+    var ndatabase=[]
+    for(i=0;i<12;i++) {
+		if(new_entry_queue.length==0)
+			break;
+        ndatabase.push(new_entry_queue.pop());
+    }  
+    var unseen=[]
+    // add new from database
+    var any_new=false
+    for(i in ndatabase) {
+        if(!database[ndatabase[i].signature]) {
+            orig_db[ndatabase[i].signature]=ndatabase[i];
+            database[ndatabase[i].signature]=ndatabase[i];
+            var d=database[ndatabase[i].signature]
+            
+            d.creds=CheckCreds(d)
+            d.score=0;
+            d.votes={}
+            d.numchildren=0
+            
+            any_new=true
+
+            unseen.push(ndatabase[i])
+        }
+    }
+    
+    // Update parents
+    // this is broken, but works for now.
+    for (i in unseen) {
+        //Log("unseen: "+unseen[i])
+        var d=unseen[i]
+        if(d.message&&d.message.vote) {
+            var t=database[d.message.parent];
+            if(t)
+                t.votes[KeyToString(d.pubkey)]=d.message.vote
+        }
+        if(d.message&&d.message.parent) {
+            var t=database[d.message.parent]
+            if(t) {
+                t.numchildren++
+            }
+        }
+    }
+    //Log("Cred check time: "+(MyCurrentTime()-start_time))
+    if(any_new) {
+        UpdatePageServerStats()
+
+        for (i in database) {
+            var d=database[i]
+            d.score=0;
+/*            d.votes={}
+            d.numchildren=0*/
+        }
+        
+        for (i in database) {
+            var d=database[i]
+            for (k in d.votes) {
+                d.score=(d.score || 0) + d.votes[k];
+            }
+        }
+        
+        //AddEntriesToPage(ndatabase)
+        PageUpdate(true)
+    }
+    //Log("New queue time: "+(MyCurrentTime()-start_time))
+}
+
+function jsoncallback(new_entries) {
+    Log("received entries: "+new_entries.length)
+    for (i in new_entries)
+        new_entry_queue.push(new_entries[i])
+}
+
+function AddEntriesToPage(ndatabase) {
+    UpdateCommentsFromDatabase(true,ndatabase)
+}
+
+// Get all children of something
+// Really slow implementation.
+function GetChildren(d) {
+    var dsig
+    if(typeof d == "string")
+        dsig=d;
+    else
+        dsig=d.signature;
+    
+    /*if(!database[dsig]) {
+        //database[dsig]={signature:dsig,message:""}
+        jsoncallback([{signature:dsig,message:""}])
+    }*/
+    var children=[dsig]
+    var found={}
+    found[dsig]=true
+    for(kn=0;kn<children.length;kn++) {
+        var k=children[kn];
+        for(i in database) {
+            if(database[i].message.parent==k&&!found[database[i].signature]) {
+                children.push(database[i].signature)
+                found[database[i].signature]=true;
+            }
+        }
+    }
+    /*Log("children:")
+    LogJSON(children)*/
+    var dchildren=[]
+    for(i in children) {
+        if(database[children[i]])
+            dchildren.push(database[children[i]])
+    }
+    return dchildren;
+}
+
+
+// DUPLICATED FROM SERVER
+function IsMatch(query,entry) {
+    if(typeof query != typeof entry) return
+    for (i in query) {
+        if(
+            (typeof(query[i])=="object"&&!IsMatch(query[i],entry[i])) ||
+            (query[i]!=entry[i]))
+                return false;
+    }
+    return true;
+}
+function QueryDB(query) {
+    var ret=[]
+    for (i in database) {
+        var entry=database[i];
+        if(IsMatch(query,entry)) {
+            ret.push(entry);
+        }
+    }
+    return ret;
+}
+
+function ResetPage() {
+   page.innerHTML=""
+   window_lookup={}
+   cur_db={}
+}
+
+// something off the internert
+function TimeDifferenceString(earlierDate,laterDate)
+{
+    var nTotalDiff = laterDate.getTime() - earlierDate.getTime();
+    var oDiff = new Object();
+
+    oDiff.days = Math.floor(nTotalDiff/1000/60/60/24);
+    nTotalDiff -= oDiff.days*1000*60*60*24;
+
+    oDiff.hours = Math.floor(nTotalDiff/1000/60/60);
+    nTotalDiff -= oDiff.hours*1000*60*60;
+
+    oDiff.minutes = Math.floor(nTotalDiff/1000/60);
+    nTotalDiff -= oDiff.minutes*1000*60;
+
+    oDiff.seconds = Math.floor(nTotalDiff/1000);
+    
+    if(oDiff.days>60) {
+        return ""+earlierDate.toISOString()
+    }
+
+    return (oDiff.days&&(oDiff.days+"d "))+
+        (oDiff.hours&&(oDiff.hours+"h "))+oDiff.minutes+"m "+oDiff.seconds+"s"
+}
+
+function GetUsernameString(pubkey) {
+	var ret="???"
+	if(typeof pubkey == "string")
+		ret="["+pubkey+"]"
+	if(pubkey && pubkey.e) {
+		var diffstr=KeyFromJSON(pubkey).ProofDifficulty()
+		ret="["+pubkey.e.substr(0,pubkey.e.length-1)+"/"+pubkey.n.substr(0,5)+"/"+diffstr+"]"
+	}
+	return ret
+}
+
+/* Updates the DOM with the database
+
+This is very slow because it usually does a full update - as in,
+it deletes the whole page, and recreates a new one.  Chrome is about 5x faster for this,
+So it's probably the sheer amount of javascript being run... and it's not simple javascript either.
+On the ipad, this doesn't even finish if it takes too long.
+
+Speedup 1: don't update 500 comments at once (done by callers of this function)
+Speedup 2: don't recreate static stuff (and a lot of it is static).
+Speedup 3: do this gradually.  Can just create top part of page, wait for scrollage.
+
+I want to change this to another model, though.  That is, don't create
+the tree here.  Create it in another function.  That will allow custom ordering
+of children.
+
+Also, this is the bulk of the "client".
+*/
+
+
+function UpdateCommentsFromDatabase(full_update,db)  {
+    var start_time=MyCurrentTime()
+    //Log(start_time)
+    db=db||database
+    
+    var nentries=0
+    // Add to current list
+    for (i in db) {
+        var d=db[i]
+        if(!cur_db[d.signature]) {
+            cur_db[d.signature]=d
+            nentries++
+        }
+    }
+	
+    Log("updating page (SLOW) nentries: "+nentries)
+    // in case an Object was passed in, make it into an Array.
+    var array_db=[]
+    for (i in cur_db) array_db.push(cur_db[i])
+    db=array_db
+    db.sort(function(a,b) {return (a.time>b.time)?1:-1})
+    
+    if(cur_db.length==0) {
+        $("#page").html("Nothing here (yet?)")
+    }
+    
+    
+    for (i in db) {
+        var d=db[i]
+        var m=d.message;
+        var hascomment=m.comment||m.comment===""
+
+        if(typeof(m)=="string" && m.substr(0,10)=="just check")
+            continue;
+
+        if(window_lookup[d.signature]) continue;
+
+        //Log(d.pubkey+"("+m.id+")"+" says \""+m.comment+"\" "+"Parent "+m.parent)
+        var comment=document.createElement("div")
+        comment.className ="comment"
+        
+        /*if(hascomment) */{
+            var votebox=document.createElement("div")
+            votebox.className="votebox"
+            comment.appendChild(votebox)
+            var voteup=subel(votebox,"a")
+            voteup.innerHTML="&#8593;"
+            voteup.href="javascript:void(0)"
+            voteup.onclick=function(d) {
+                return function() {
+                    Vote(d.signature,1)
+                    return false;
+                }
+            }(d)
+        }
+        
+        var thiscomment=document.createElement("div")
+        thiscomment.className="thiscomment"
+        comment.appendChild(thiscomment)
+    
+        //barebones
+        //comment.innerHTML=d.pubkey+"("+m.id+")"+" says \""+m.comment+"\" "+"Parent "+m.parent
+        var namebar=document.createElement("div")
+        namebar.className="namebar"
+                
+        //if(d.pubkey) 
+		// Create username
+        {
+            var is_me=d.pubkey&&KeyToString(KeyFromJSON(d.pubkey))==KeyToString(KEY2.PublicParts())
+            var username=document.createElement("text")
+			username.innerHTML=GetUsernameString(d.pubkey)
+            if(d.signature)
+                username.innerHTML+=":"+d.signature.substr(0,5)
+            username.title=JSON.stringify(orig_db[d.signature],null,4)
+            username.className="username"+(is_me?" username_me":"")
+            namebar.appendChild(username)
+        }
+        var score=subel(namebar,"text")
+        score.innerHTML=""
+        
+        {
+            var t = d.time || d.message.time || 0
+            var txt=TimeDifferenceString(new Date(t*1000), new Date())
+            var tel=subel(namebar,"text")
+            tel.innerHTML=txt
+            tel.className="timestring"
+            tel.title="Date of post: "+(new Date(t*1000)).toLocaleDateString()
+        }
+        function NewFlag(text,isgood,title) {
+            var nd=document.createElement("a");
+            nd.className=(isgood?"flaggood":"flagbad")
+            nd.innerHTML=text
+            nd.title=title
+            namebar.appendChild(nd)
+        }
+        
+        //LogJSON(d)
+        if(!d.creds) { Log("No creds: "+i) ; LogJSON(d)}
+        NewFlag("S",d.creds.verified,"Signature: "+d.signature)
+		var diff=ProofDifficulty(d.signature,d.proof)
+        NewFlag(diff,d.proof,"Proof of work: "+d.proof+" Difficulty: "+diff)
+        
+        if(typeof(m)=="string") {
+            subel(namebar,"text").innerHTML=m
+        }
+        if(m.vote) {
+            subel(namebar,"text").innerHTML="Vote: "+m.vote
+        }
+        
+        thiscomment.appendChild(namebar)
+        
+        /*if(is_me) {
+            NewFlag("Me",creds.verified,"Key: "+KeyToString(KeyFromJSON(d.pubkey)))
+        }*/
+        if(m.chat) {
+            //subel(thiscomment,"div").innerHTML="Chat: "+m.chat
+            var el=subel(namebar,"text");
+            el.innerHTML=SingleLineToHTML(m.chat)//CommentToHTML(m.chat,true)
+            el.className="chattext"
+        }
+        var usertext=document.createElement("div")
+        //usertext.innerHTML=CommentToHTML(m.comment)
+        //var usertext=document.createTextNode(m.comment)
+        usertext.className="usertext"
+        thiscomment.appendChild(usertext)
+        if(view_structs) {
+            usertext.appendChild(CommentToHTML(m))
+        } else {
+            if(hascomment) {
+                usertext.appendChild(CommentToHTML(m.comment))
+            }
+        }
+        function NewButton(text,fn,targ_element) {
+            var replybutton2=document.createElement("a")
+            replybutton2.innerHTML=text
+            replybutton2.className="button"
+            if(typeof fn=="string") {
+                replybutton2.href=fn
+            } else {
+                replybutton2.onclick=fn
+                replybutton2.href="javascript:void(0)"
+            }
+            if(!targ_element)
+                buttons.appendChild(replybutton2)
+            else
+                targ_element.appendChild(replybutton2)
+        }    
+        var makebuttons=true
+        if(makebuttons){
+            
+            var buttons=document.createElement("div")
+            buttons.className="buttons"
+            thiscomment.appendChild(buttons)
+            
+            
+            NewButton("this",ShowChildrenLink(d.signature))
+            
+            if((typeof d.message.parent=="string") /*&&  GetPageHash()!=ShowChildrenLink(d.message.parent).substr(1)*/) {
+                NewButton("parent",ShowChildrenLink(d.message.parent))
+            }
+            
+            /*NewButton("only",
+                (function(d) {
+                    return function() {
+                        UpdateCommentsFromDatabase(true,[d])
+                    }
+                })(d))*/
+              
+            NewButton("refresh-children",
+                (function(d) {
+                    return function() {
+                        var rtext=subel(window_lookup[d.signature].main,"text")
+                        rtext.innerHTML="requesting.."
+                        UpdateWithSearch(
+                            {message:{parent:d.signature}},
+                            function() {rtext.parentNode.removeChild(rtext)})
+                    }
+                })(d,buttons))
+                
+            if(d.pubkey)
+                NewButton("stalk",ShowUserLink(d.pubkey))
+            NewButton("reply",
+                (function(comment,d) {
+                    return function() {
+                        var form=document.createElement("form")
+                        var rboxdiv=document.createElement("div")
+                        var rbox=document.createElement("textarea")
+                        
+                        
+                        form.className="comment"
+                        form.onsubmit=function() {
+                            Reply(d.signature,rbox.value)
+                            comment.removeChild(form)
+                            return false;
+                        }
+                        rbox.className="replybox"
+                        
+                        rboxdiv.appendChild(rbox)
+                        var submitbutton=document.createElement("button")
+                        submitbutton.innerHTML="Save"
+                        submitbutton.type="submit"  
+                        submitbutton.onclick=function() {}
+                        
+                        var cancelbutton=document.createElement("button")
+                        cancelbutton.innerHTML="Cancel"
+                        cancelbutton.type="button"  
+                        cancelbutton.onclick=function() {comment.removeChild(form)}
+                        
+                        form.appendChild(rboxdiv)
+                        form.appendChild(submitbutton)
+                        form.appendChild(cancelbutton)
+                        comment.appendChild(form)
+                        
+                        var rpreview=subel(form,"br") //document.createElement("div")
+                        var rpreview=subel(form,"div") //document.createElement("div")
+                        rpreview.className="usertext"
+                        rbox.onkeyup=function() {
+                            rpreview.innerHTML=""
+                            rpreview.appendChild(CommentToHTML(rbox.value))
+                        }
+                        
+                        rbox.focus()
+                    }
+                })(buttons,d))
+            NewButton("&#3232;_&#3232",(function(comment,d) {
+                return function() {
+                    Reply(d.signature,"&#3232;_&#3232;")
+                    return false;
+                }
+            })(buttons,d))
+            /*NewButton("generic-reply",(function(comment,d) {
+                return function() {
+                    var replies=[
+                        "I did nazi that coming.",
+                        "Checkmate, theists!",
+                        "You got to be kitten me.",
+                        "relevant xkcd",
+                        //"<img src=http://i.imgur.com/WnL8V.jpg />",
+                       ]
+                    var text=replies[Math.floor(Math.random()*replies.length)]
+                    Reply(d.signature,text)
+                    return false;
+                }
+            })(buttons,d))*/
+            
+
+            //if(
+            /*NewButton("delete",(function(comment,d) {
+                return function() {
+                    Vote(d.signature,-1)
+                    return false;
+                }
+            })(buttons,d))*/
+        
+            // This is not implemented at all, besides making a single line text box.
+            var chatfn=(function(d) {
+                 return function() {
+                    var form=document.createElement("form")
+                    var rboxdiv=document.createElement("div")
+                    var rbox=document.createElement("input")
+                    rbox.type="text"
+                    form.className="comment"
+                    form.onsubmit=function() {
+                        //Reply(d.signature,{chat:true,text:rbox.value})
+                        Post({chat:rbox.value,parent:d.signature})
+                        UpdateWithSearch({message:{parent:d.signature}})
+                        //comment.removeChild(form)
+                        rbox.value=""
+                        return false;
+                    }
+                    //rbox.className="replybox"
+                    rbox.size=50
+                    rboxdiv.appendChild(rbox)
+                    var submitbutton=document.createElement("button")
+                    submitbutton.innerHTML="Save"
+                    submitbutton.type="submit"  
+                    submitbutton.onclick=function() {}
+                    
+                    var cancelbutton=document.createElement("button")
+                    cancelbutton.innerHTML="Cancel"
+                    cancelbutton.type="button"  
+                    cancelbutton.onclick=function() {form.parentNode.removeChild(form)}
+ 
+                    form.appendChild(rboxdiv)
+                    form.appendChild(submitbutton)
+                    form.appendChild(cancelbutton)
+
+                    //comment.appendChild(form)
+                    window_lookup[d.signature].ChatBoxReply().appendChild(form)
+                    rbox.focus()
+                }
+            })
+            NewButton("chat",chatfn(d))
+            
+            /*NewButton("like",(function(comment,d) {
+                return function() {
+                    Vote(d.signature,1)
+                    return false;
+                }
+            })(buttons,d))
+            NewButton("dislike",(function(comment,d) {
+                return function() {
+                    Vote(d.signature,-1)
+                    return false;
+                }
+            })(buttons,d))*/
+
+        }
+        var children=document.createElement("div")
+        comment.appendChild(children)
+        //children.innerHTML=d.numchildren+" replies"
+        var thiswindow={
+            main:comment,
+            thiscomment:thiscomment,
+            children:children,
+            score:score,
+            ChatBox:function() {
+                if(!this.chatbox) {
+                    chatbox=document.createElement("div")
+                    this.main.appendChild(chatbox)
+                    chatbox.className="chatbox"
+                    //subel(chatbox,"text").innerHTML="chat"
+                    this.chatbox=chatbox
+                    
+                    this.chatboxchats=subel(this.chatbox,"div")
+                    this.chatboxreply=subel(this.chatbox,"div")
+                    NewButton("chat",chatfn(database[m.parent]),chatbox)
+                    // closures in javascript are so annoying.
+                    NewButton("refresh",function(m) { return function() {UpdateWithSearch({message:{parent:m.parent}})}}(m),chatbox)
+                }
+                return this.chatboxchats
+            },
+
+            ChatBoxReply:function() {
+                this.ChatBox();
+                return this.chatboxreply
+            },
+        }
+        window_lookup[d.signature]=thiswindow
+    }
+    // puts the elements in their places
+    for (i in db) {
+        var d=db[i]
+        var m=d.message;
+        
+        var w=window_lookup[d.signature]
+        if (!w) continue; // we didn't make the window.  we didn't care about it.
+        
+        var targcomment
+        var comment=w.main
+        if(!m.parent || !window_lookup[m.parent] || sequential_view) {
+            targcomment=page
+            var ocomment=comment;
+            comment=document.createElement("div");
+            comment.className="pagetoplevel"
+            comment.appendChild(ocomment)
+        } else  {
+            targcomment=window_lookup[m.parent].children
+        }
+        if(typeof m.chat=="string") {
+            window_lookup[m.parent].ChatBox().appendChild(comment)
+        } else {
+            targcomment.insertBefore(comment, targcomment.firstChild);
+        }
+    }
+    
+    // Update scores
+    for(i in window_lookup) {
+        if(typeof database[i].score != "undefined") {
+            window_lookup[i].score.innerHTML=database[i].score+" points, >="+database[i].numchildren+" replies"
+        }
+    }
+    Log("Done updating page Time: "+(MyCurrentTime()-start_time))
+}
+
+DOCHEAD=document.getElementsByTagName('HEAD')[0]
+
+// MakeJSONRequest: takes a path, called request, a structure called json, and a callback called callback.
+function MakeJSONRequest(request,json,callback) {
+    Log("JSON Request: \""+request+"\", data:" )
+    var str=JSON.stringify(json)
+    MakeRequest(request,str,callback)
+    LogHTML(JSONToHtml(json));
+    //Log(str)
+}
+
+function ShortenString(s,len) {
+    if(s.length<=len) return s
+    return s.substr(0,len)+".."
+}
+
+var active_xhr=[]
+function MakeRequest(request,data,callback) {
+    if(!callback) throw(0);
+    var xhr = new XMLHttpRequest();
+    active_xhr.push(xhr)
+    if(xhr) { 
+        var url=SERVER_NAME+request
+        if(data) url+="?d="+escape(data)
+        Log("XHR to server '"+SERVER_NAME+"', request: "+ShortenString(request,20))
+        xhr.open('GET', url, true);
+        xhr.onreadystatechange = function(xhr,callback) { return function() {
+            if(xhr.readyState==4&&xhr.status==200) {
+                Log("XMLHttpRequest done, Bytes: "+xhr.responseText.length)
+                //Log(xhr.responseText)
+                callback(JSON.parse(xhr.responseText))
+            }
+        }}(xhr,callback)
+        
+        var delay=450 // simulate a bit of network delay
+        setTimeout(function(xhr) { return function() {xhr.send()}}(xhr),delay)
+        //xhr.send()
+        
+        //xhr.send(); 
+    }
+}
+
+function KeyToString(k) {
+    var ret=k.e+"/"+k.n
+    //if(k.d) ret+="/"+k.d
+    return ret
+}
+
+function StringToKey(s) {
+    var idx=s.indexOf("/")
+    // E first, then N
+    var idx2=s.indexOf("/",idx+1)
+    
+    return KeyFromParts(s.substr(idx+1,idx2-idx-1),s.substr(0,idx),idx2?s.substr(idx2+1):false)
+}
+function KeyFromJSON(k) {
+    return KeyFromParts(k.n,k.e,k.d,k.f)
+}
+
+// sha1 in modified base64 (used for signing)
+function sha1_64(text) {
+    return parseBigInt(sha1(text),16).toString(64)
+}
+// sha1 in base2 (used for very inefficient proof-of-work)
+function sha1_2(text) {
+    return parseBigInt(sha1(text),16).toString(2)
+}
+
+
+// Tries to find a proof for text text, minimum difficulty difficulty, with maximum tries maxtries.
+function ProoveWork(text,difficulty,maxtries) {
+    var before = new Date();
+    difficulty=difficulty || 6
+    maxtries=maxtries||150000
+    for(i=0;i<maxtries;i++) {
+        var a=i.toString(32)
+        if(VerifyProof(text,a,difficulty)) {
+            Log("Proof found at "+a+" ("+i+")")
+			Log(sha1_2(a+text))
+            var after = new Date();
+            Log("Proof Time: " + (after - before) + "ms");
+            return a;
+        }
+    }
+    return "no proof found"
+}
+
+
+
+
+function ThreadMan() {
+    MoreProof() 
+    ProcessNewEntryQueue();
+    setTimeout(ThreadMan,10)
+}
+
+function RandInt(m) {
+    return Math.floor(Math.random()*m)
+}
+
+
+var KEY_PROOF_TRIES=0
+function MoreProof(ount) {
+    //document.getElementById("proofbutton").className="pbutton pbuttonact"
+    var text=KeyToString(KEY2.PublicParts());
+    var maxdiff=KEY2.ProofDifficulty()
+    //Log("Prooving.. Difficulty: "+maxdiff)
+    var maxa=null
+    
+    if(!KEY2.proofs) KEY2.proofs={}
+            
+    var numproofs=document.getElementById("proofspertick").value
+    // Only try 100 keys per "tick".  Haxors are welcome to increase this to generate
+    // a better key.  Just trying to simulate a level playing field.
+    for(k=0;k<numproofs;k++) {
+        var str=""
+        
+        var plen=RandInt(10)
+        for(i=0;i<plen;i++)
+            str+=int2char(RandInt(64))
+        //var a=Math.floor((Math.random()*100000000)).toString(32)
+        a=str
+        //Log(str)
+        var diff=ProofDifficulty(text,a)
+        if(diff>10 && !KEY2.proofs[a]) {
+            //Log("New proof.  difficulty="+diff+" Count: "+KEY_PROOF_TRIES+" Proof="+a)
+            KEY2.proofs[a]=diff
+            //LogJSON(KEY2.proofs)
+        }
+        if(diff>maxdiff) {
+            //Log("New proof.  difficulty="+diff+" Count: "+KEY_PROOF_TRIES+" Proof="+a)
+            //Log(sha1_2(a+text))
+            maxdiff=diff;
+            maxa=a;
+            KEY2.proof=a
+            KeyToDoc()
+        }
+        KEY_PROOF_TRIES++
+    }
+}
+
+function GenerateKeyOld() {
+    var before = new Date();
+    var rsa = new RSAKey();
+    var dr = document.rsatest;
+    Log("Generating RSA Key...");
+    // NOTE: public exponent (e or "name") has to be an odd number - just add a 1 at the end to do this.
+    rsa.generate(document.getElementById("mybits").value, document.getElementById("myname").value+"1");
+
+    var after = new Date();
+    Log("Key Generation Time: " + (after - before) + "ms");
+
+    //var ret=KeyFromWuKey(rsa)
+    var ret
+    {
+        var base=64
+        ret=KeyFromParts(rsa.n.toString(base),rsa.e.toString(base),rsa.d.toString(base))
+    }
+    KEY_PROOF_TRIES=0
+    //ret.proof=ProoveWork(KeyToString(ret.PublicParts()),10)
+    Log(KeyToString(ret.PublicParts()))
+    //Log(ret.PublicParts().ProofDifficulty())
+    return ret
+}
+
+function do_genrsa1() {
+    //KEY2=GenerateKeyOld()
+	KEY2=GenerateKey(document.getElementById("mybits").value, document.getElementById("myname").value);
+    KeyToDoc()
+    PageUpdate(true)
+}
+function ReadKeyFromPage() {
+    KEY2=KeyFromJSON(JSON.parse(document.getElementById("mycreds").value))
+    KeyToDoc()
+}
+function SaveToLocalStorage() {
+    ReadKeyFromPage()
+    var str=JSON.stringify(KEY2.AllPartsJSON())
+    localStorage.setItem("mykey", str);
+    Log("Set LocalStorage from doc: ")
+    LogJSON(localStorage)
+}
+function ClearLocalStorage() {
+    return localStorage.removeItem("mykey")
+}
+function KeyFromLocalStorage() {
+    return KeyFromJSON(JSON.parse(localStorage.getItem("mykey")))
+}
+function SetKeyFromLocalStorage() {
+    KEY2=KeyFromLocalStorage()
+    Log("loaded key:")
+    LogJSON(KEY2.AllPartsJSON())
+    KeyToDoc()
+}
+
+function KeyToDoc() {
+    document.getElementById("mycreds").value=JSON.stringify(KEY2.AllPartsJSON(),null,4)
+    $("#credsdifficulty").html(GetUsernameString(KEY2.PublicPartsJSON()))
+    //document.getElementById("myname").value=KEY2.e.substr(0,KEY2.e.length-1)
+    //Log("Loaded key from usertext")
+    //LogJSON(KEY2.AllPartsJSON())
+}
+
+function GetPageHash() {
+  var hash = window.location.hash;
+  return hash.substring(1); // remove #
+}
+function SetPageHash(a) {
+    window.location.hash=a
+}
+
+window.onload = function() {
+    docCookies.removeItem("mykey")
+    
+    page=document.getElementById("page")
+    
+    //callOtherDomain()
+    //MakeRequest("json",null,jsoncallback);
+	Log(sha1_2("hello"))
+	Log(sha1("hello"))
+	Log(parseBigInt(sha1("hello"),16).toString(64))
+	/*for(i=0;i<1255;i++)
+		Log(parseBigInt(i.toString(16),16).toString(64))*/
+    //
+    
+    Log("try rsa")
+    Log(parseBigInt("{}",256).toString(64))
+    var tstring="a{}{F{}a"
+    Log(s2r(tstring))
+    Log(r2s(s2r(tstring)))
+    //assert(r2s(s2r(tstring))==tstring)
+    Log("Cookie: ")
+    Log(document.cookie)
+    Log("LocalStorage")
+    Log(localStorage)
+    
+    // initialize with invalid key
+    KEY2=KeyFromParts()  
+    Log("Reading LocalStorage")
+    try {
+        //KEY2=KeyFromJSON(JSON.parse(document.cookie))
+        KEY2=KeyFromLocalStorage()
+        Log(KEY2.Decrypt(KEY2.Encrypt("Worx"))=="Worx"?"Key works":"Key does not work!")
+    } catch(e) { Log("Error parsing LocalStorage: "+e)
+        do_genrsa1() // sets KEY2
+    }
+    Log(KeyToString(KEY2))
+    KEY2.SignMessage("hi")
+    
+    KeyToDoc()
+    
+    var TESTKEY=KeyFromJSON(GenerateKey(128,"hihihi"));
+    Log(JSON.stringify(TESTKEY))
+    
+    {
+        var fromstr=KeyToString(TESTKEY)
+        Log("KeyToString: "+fromstr)
+        Log("StringToKey: "+JSON.stringify(StringToKey(fromstr)))
+    }
+
+    {    
+        var otext="he3ge"
+        var cipher=TESTKEY.Encrypt(otext)
+        Log("Ciphertext: "+cipher)
+        var decrypt=TESTKEY.Decrypt(cipher)
+        Log("Decrypted: "+decrypt)
+        if(otext!=decrypt)
+            Log("DECRYPTION FAILED")
+        else
+            Log("Crypto succeeded")
+    }
+    
+    Log("SHA1: "+sha1_64("shatest"))
+    
+    try {
+    
+        var message="hihihi"
+        //Log("Signature: "+TESTKEY.SignMessage(message))
+        
+        var signature=TESTKEY.SignMessage(message)
+        Log("Signature: "+signature)
+        Log(TESTKEY.CheckSignature(message,signature))
+        var proof=ProoveWork("shtest")
+        Log("Proof: "+proof)
+        Log("Verifyproof: "+VerifyProof("shtest",proof))
+        Log("rsa success")
+        LogHTML(JSONToHtml({a:1}))
+
+        Log(KeyToString(TESTKEY))
+        
+        Log("TEST DONE")
+        
+    } catch(e) {
+        //Log("TEST FAILED: "+e)
+        alert("TEST FAILED: "+e)
+    }
+    
+    //Post("just checking in, url="+document.URL)
+    
+    document.getElementById("log").style="visibility:hidden;"
+    ThreadMan()
+    
+    /*Log(GetPageHash())
+    Log(SetPageHash('hi'))
+    Log(GetPageHash())*/
+    if(GetPageHash()=="")
+        GoodUpdateFunction({message:{parent:'root'}})
+
+    $(window).bind('hashchange', PageHashChanged);
+    PageHashChanged()
+    
+    // Initializers, need to make an auto-initializer instead
+    UpdateServerStats()
+    UpdateServerStats2()
+    MakeLogButtons()
+    UpdateSN()
+	if(false) {
+		$("#expertlog").hide()
+		$("#expertbuts").hide()
+	}
+};
+
+
+
+// Update the page with stuff.  Stored in the hash, so this just writes to the hash.
+function GoodUpdateFunction(search) {
+    SetHash2({search:search,})
+}
+
+function ShowUserLink(k) {
+    return HashStr({
+        search:{pubkey:{n:k.n}}
+    })
+}
+
+function ShowChildrenLink(e) {
+    return HashStr(e)
+}
+
+function ShowOnlyChildrenLink(e) {
+    return HashStr({
+        search:{message:{parent:e}}})
+}
+
+function HashStr(h) {
+    return "#"+JSON.stringify(h)
+}
+
+function SetHash2(h) {
+    SetPageHash(JSON.stringify(h))
+}
+
+// Store hashes visited already.  on a new one, scroll to the top of the page.
+// doesn't work that well.  Should probably check history or something.
+var seen_hashes={}
+/*
+General update function, for when the page hash changed (back/forward in the browser)
+By default, it queries the server for added items.
+*/
+function PageHashChanged(no_query) {
+    // jQuery sends non-boolean stuff here.
+    no_query=(typeof no_query=="boolean")?no_query:false;
+    Log("Processing page hash: "+GetPageHash()+(no_query?" query":" no query"))
+    document.title="wabe "+GetPageHash()
+    ResetPage()
+    PageUpdate(no_query)
+}
+
+// Update 
+function PageUpdate(no_query) {
+    if(!seen_hashes[GetPageHash()]) {
+        Log("Y offset: "+window.pageYOffset)
+        if(window.pageYOffset>120)
+            window.scrollTo(0,120);
+        seen_hashes[GetPageHash()]=true
+    }
+	document.getElementById("pagetitle").innerHTML="?"
+    try {
+        var call=JSON.parse(GetPageHash())
+    } catch(e) {
+		document.getElementById("pagetitle").innerHTML="invalid query"
+        return;
+    }
+
+    if(typeof call=="string") {
+        if(!database[call]) {
+            if(!no_query)
+                UpdateWithSearch({signature:call})
+            
+        } else {
+            AddEntriesToPage(GetChildren(database[call]))
+        }
+        //AddEntriesToPage(QueryDB({message:{parent:call}}))
+        AddEntriesToPage(GetChildren(call))
+        if(!no_query)
+            UpdateWithSearch({message:{parent:call}})
+        var linktxt="<h3>"
+        if(database[call]&&database[call].message.parent)
+            linktxt+="<a class=biglink href="+ShowChildrenLink(database[call].message.parent)+">"+ShortenString(database[call].message.parent,12)+"</a>/"
+        linktxt+="<a class=biglink href="+ShowChildrenLink(call)+">"+ShortenString(call,12)
+        linktxt+="</h3>"
+        document.getElementById("pagetitle").innerHTML=linktxt
+    } else if(call.search) {
+        
+        AddEntriesToPage(QueryDB(call.search))
+        //if(!call.dont_request)
+        if(!no_query)
+            UpdateWithSearch(call.search)
+        $("#pagetitle").html(JSONToHtml(call))
+		if(call.search.message && typeof call.search.message.parent=="string")
+			document.getElementById("newtopicparent").value=call.search.message.parent
+    } else if(typeof call=="boolean") {
+        AddEntriesToPage({})
+        $("#pagetitle").html(JSONToHtml(call))
+    } else {
+        document.getElementById("pagetitle").innerHTML="all"
+        if(!no_query)
+            UpdateWithSearch({})
+    }
+}
+
+function NewTopic() {
+    var parent=document.getElementById("newtopicparent").value
+    var text=document.getElementById("newtopictext").value
+    Reply(parent,text)
+    window.location=ShowChildrenLink(parent)
+}
+
+function UpdateAllEntries() {
+    var ae=document.getElementById("allentries");
+    ae.value=JSON.stringify(database,null,4)
+    //ae.onclick=false
+}
+
+
+function NewVersionInfo() {
+    SetHash2("1bzQHJAJNFvempWyqgSh8l")
+}
+
+
+function NewLogButton(name,fn) {
+    var but=subel(document.getElementById("logbuttons"),"a")
+    but.innerHTML=name
+    but.className="pbutton"
+    but.onclick=fn
+    but.href="javascript:"
+}
+function MakeLogButtons() {
+    NewLogButton("show whole database",function() {
+        LogJSON(database)
+    })
+    NewLogButton("post something",function() {
+        Post({})
+    })
+    NewLogButton("compute timehash",function() {
+        var sigs=""
+        var sigs2=[]
+        for (i in database) {
+            sigs+=database[i].signature+","
+            sigs2.push(database[i].signature)
+        }
+        //Log(sigs)
+        //Log(sha1_64(sigs))
+        var e=Post({sigs:sigs2,parent:"timehash",time:database_stats.current_time})
+        UpdateWithSearch({signature:e.signature})
+    })
+    subel(document.getElementById("logbuttons"),"br")
+    NewLogButton("sign something",function() {
+        var sig=KEY2.SignMessage("hi")
+        var sha=SHAForSignature("hi",KEY2.n)
+        LogJSON({
+            sig:sig,
+            sha:sha,
+            check:KEY2.CheckSignature("hi",sig),
+        })
+    })
+    NewLogButton("clear log",function() {document.getElementById("log").innerHTML=""})
+	NewLogButton("GetAllChildren",function() {
+		for (i in cur_db) {
+			UpdateWithSearch({message:{parent:cur_db[i].signature}})
+		}
+	})
+	NewLogButton("AllProofs",function() {
+		LogJSON(KEY2.proofs)
+	})
+}
+</script>
+</head>
+
+<body>
+<P>
+<font face="arial">
+<a href="/" style="font-size:x-large;">wabe</a><a href=server.js>server source</a>
+<a href="javascript:void" onclick='NewVersionInfo(); '>new version (5/15) changes</a> 
+<div />  
+</font>
+<a class="pbutton" onclick="MakeRequest('json',null,jsoncallback);" href="javascript:void(0)" title="Update comments without reloading the page.">Full Update</a>
+<a class="pbutton" onclick="NewTopic()" href="javascript:void(0)" title="Post a new top-level comment">New Topic</a>
+<input type="text" id=newtopicparent /><input type="text" id=newtopictext /> 
+<br />
+
+<a class="pbutton" onclick="window.location=ShowOnlyChildrenLink('')" href="javascript:void(0)" title="">''</a>
+<a class="pbutton" onclick="window.location=ShowOnlyChildrenLink('root')" href="javascript:void(0)" title="">'root'</a>
+<a class="pbutton" onclick="window.location=ShowOnlyChildrenLink('hersatopic')" href="javascript:void(0)" title="">'hersatopic'</a>
+<a class="pbutton" href=#"root" title="">'root'</a>
+<a class="pbutton" onclick="window.location=ShowOnlyChildrenLink('pics')" href="javascript:void(0)" title="">'pics'</a>
+<a class="pbutton" href="#true" title="">true</a>
+<a class="pbutton" onclick="window.location=ShowOnlyChildrenLink('timehash')" href="javascript:void(0)" title="">timehash</a>
+<a class="pbutton" onclick="NormalView()"  id="normalview" href="javascript:void(0)" title="">Tree</a>
+<a class="pbutton" onclick="SequentialView()" id="sequentialview" href="javascript:void(0)" title="">Sequential</a>
+<a class="pbutton" onclick="ViewStructs()" id="viewstructsbutton" href="javascript:void(0)" title="">Structs</a>
+<div id="expertbuts">
+	<br /><br />
+	<a class="pbutton" onclick="GoodUpdateFunction({},true)" href="javascript:void(0)" title="">Show All</a>
+	<br />
+	<a class="pbutton" onclick="PageHashChanged(true)" href="javascript:void(0)" title="">PageHashChanged(t)</a>
+	<a class="pbutton" onclick="PageHashChanged(false)" href="javascript:void(0)" title="">PageHashChanged(f)</a>
+</div>
+</P>
+<div style="position:absolute;left:500px;top:10px">
+	<div style="position:absolute;left:210px;top:0px;width:400;height:120;overflow:hidden;">
+		<b id=credsdifficulty title="Your public key."></b><br />
+		<a onclick="ReadKeyFromPage()" class="pbutton" href="javascript:void(0)" title="Save the key in the text box to LocalStorage">Read from page</a>
+		<a onclick="SaveToLocalStorage()" class="pbutton" href="javascript:void(0)" title="Save the key in the text box to LocalStorage.  (NOTE: Tor users: localStorage/sessionStorage doesn't work in Tor browser, but it should, so I'm leaving it here.)">Save</a>
+		<a onclick="SetKeyFromLocalStorage()" class="pbutton" href="javascript:void(0)" title="Load the key stored in LocalStorage">Load</a><br />
+		<a onclick="ClearLocalStorage()" class="pbutton" href="javascript:void(0)" title="Clear">Clear</a><br />
+		<textarea id=mycreds wrap='off' style="width:300;height:100;overflow:hidden;">...</textarea>
+	</div>
+
+	<form style="border:1px solid black;">
+		name <input type=text value="anonymous" id=myname size=16></input><br />
+		bits <input type=text value="256" id=mybits size=5></input><br />
+		diff <input type=text value="10" id=mypostdifficulty size=5></input><br />
+		<text title="Number of tries to get new proof, per 10ms tick">care</text><input type=text value="100" id=proofspertick size=5></input><br />
+		<div><a onclick="do_genrsa1()" class="pbutton" href="javascript:void(0)" title="Generate a *new* key, overwriting your old one. (make sure to back it up first if you care)">New ID</a>
+		</div>
+	</form>
+</div>
+
+<div id=expertlog style="float:right;position:relative;top:0px;margin:10px;">
+processingstats:
+<div id="processingstats"></div>
+Log:
+<div id="logbuttons"></div>
+<p id="log" style="width:350px;height:400px;overflow:auto;margin:10px;background:rgb(230,230,250);">Log:</p>
+dbinfo:
+<div id="dbinfo"></div>
+</div>
+<div>
+<div id="pagetitle" class="pagetitle"></div>
+<p id="page" class="comments">Requesting..</p>
+</div>
+
+</body>
+
